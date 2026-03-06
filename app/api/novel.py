@@ -1,7 +1,9 @@
 """Novel API endpoints."""
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks
+import time
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks, Response
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 
 from app.db.database import get_db
 from app.models.novel import Novel, NovelStatus
@@ -12,11 +14,24 @@ from app.services.translation_pipeline import translate_novel as translate_novel
 
 router = APIRouter(prefix="/api/novels", tags=["novels"])
 
+# Simple in-memory cache for novel list (TTL = 30 seconds)
+_novels_cache: dict = {"data": None, "expires_at": 0.0}
+
+
+def _invalidate_novels_cache():
+    _novels_cache["data"] = None
+    _novels_cache["expires_at"] = 0.0
+
 
 @router.get("", response_model=NovelListResponse)
 def list_novels(skip: int = 0, limit: int = 20, db: Session = Depends(get_db)):
     """List all novels with pagination."""
-    total = db.query(Novel).count()
+    cache_key = f"{skip}:{limit}"
+    now = time.monotonic()
+    if _novels_cache["data"] and _novels_cache["data"].get("key") == cache_key and now < _novels_cache["expires_at"]:
+        return _novels_cache["data"]["value"]
+
+    total = db.query(func.count(Novel.id)).scalar()
     novels = (
         db.query(Novel)
         .order_by(Novel.created_at.desc())
@@ -24,7 +39,10 @@ def list_novels(skip: int = 0, limit: int = 20, db: Session = Depends(get_db)):
         .limit(limit)
         .all()
     )
-    return NovelListResponse(novels=novels, total=total)
+    result = NovelListResponse(novels=novels, total=total)
+    _novels_cache["data"] = {"key": cache_key, "value": result}
+    _novels_cache["expires_at"] = now + 30.0
+    return result
 
 
 @router.get("/{novel_id}", response_model=NovelResponse)
@@ -58,6 +76,7 @@ def create_novel(
     db.add(novel)
     db.commit()
     db.refresh(novel)
+    _invalidate_novels_cache()
     return novel
 
 
@@ -96,6 +115,7 @@ def _process_and_save_chapters(
         
     db.commit()
     db.refresh(novel)
+    _invalidate_novels_cache()
 
     # Start background translation if requested
     if auto_translate:

@@ -1,7 +1,7 @@
 """Chapter API endpoints."""
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from app.db.database import get_db
 from app.models.chapter import Chapter
@@ -27,15 +27,31 @@ def delete_chapter(chapter_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/novels/{novel_id}/chapters", response_model=ChapterListResponse)
-def list_chapters(novel_id: int, db: Session = Depends(get_db)):
-    """List all chapters of a novel."""
-    chapters = (
+def list_chapters(
+    novel_id: int,
+    skip: int = 0,
+    limit: int = 200,
+    db: Session = Depends(get_db),
+):
+    """List chapters of a novel with pagination. Only metadata is returned (no content)."""
+    query = (
         db.query(Chapter)
+        .options(
+            load_only(
+                Chapter.id,
+                Chapter.novel_id,
+                Chapter.chapter_number,
+                Chapter.title,
+                Chapter.status,
+                Chapter.created_at,
+            )
+        )
         .filter(Chapter.novel_id == novel_id)
         .order_by(Chapter.chapter_number)
-        .all()
     )
-    return ChapterListResponse(chapters=chapters, total=len(chapters))
+    total = query.count()
+    chapters = query.offset(skip).limit(limit).all()
+    return ChapterListResponse(chapters=chapters, total=total)
 
 
 @router.get("/chapters/{chapter_id}", response_model=ChapterResponse)
@@ -54,30 +70,43 @@ def navigate_chapter(chapter_id: int, db: Session = Depends(get_db)):
     if not chapter:
         raise HTTPException(status_code=404, detail="Chapter not found")
 
-    # Find previous chapter
-    prev_chapter = (
-        db.query(Chapter)
+    # Fetch prev and next IDs in a single query using subquery approach
+    prev_next = (
+        db.query(Chapter.id, Chapter.chapter_number)
         .filter(
             Chapter.novel_id == chapter.novel_id,
-            Chapter.chapter_number < chapter.chapter_number,
+            Chapter.chapter_number.in_([
+                db.query(Chapter.chapter_number)
+                .filter(
+                    Chapter.novel_id == chapter.novel_id,
+                    Chapter.chapter_number < chapter.chapter_number,
+                )
+                .order_by(Chapter.chapter_number.desc())
+                .limit(1)
+                .scalar_subquery(),
+                db.query(Chapter.chapter_number)
+                .filter(
+                    Chapter.novel_id == chapter.novel_id,
+                    Chapter.chapter_number > chapter.chapter_number,
+                )
+                .order_by(Chapter.chapter_number)
+                .limit(1)
+                .scalar_subquery(),
+            ]),
         )
-        .order_by(Chapter.chapter_number.desc())
-        .first()
+        .all()
     )
 
-    # Find next chapter
-    next_chapter = (
-        db.query(Chapter)
-        .filter(
-            Chapter.novel_id == chapter.novel_id,
-            Chapter.chapter_number > chapter.chapter_number,
-        )
-        .order_by(Chapter.chapter_number)
-        .first()
-    )
+    prev_id = None
+    next_id = None
+    for row_id, row_num in prev_next:
+        if row_num < chapter.chapter_number:
+            prev_id = row_id
+        else:
+            next_id = row_id
 
     return ChapterNavigation(
         current=chapter,
-        prev_id=prev_chapter.id if prev_chapter else None,
-        next_id=next_chapter.id if next_chapter else None,
+        prev_id=prev_id,
+        next_id=next_id,
     )

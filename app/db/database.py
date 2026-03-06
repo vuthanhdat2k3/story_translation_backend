@@ -14,6 +14,10 @@ if "localhost" not in _db_url and "127.0.0.1" not in _db_url and "sslmode" not i
 engine = create_engine(
     _db_url,
     pool_pre_ping=True,
+    pool_size=5,
+    max_overflow=10,
+    pool_timeout=30,
+    pool_recycle=1800,  # recycle connections after 30 minutes
     echo=False,
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

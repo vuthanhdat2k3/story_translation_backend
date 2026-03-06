@@ -1,6 +1,6 @@
 import enum
 from datetime import datetime
-from sqlalchemy import String, Text, Integer, DateTime, Enum, ForeignKey, func
+from sqlalchemy import String, Text, Integer, DateTime, Enum, ForeignKey, Index, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.database import Base
@@ -30,6 +30,10 @@ class Chapter(Base):
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        Index("ix_chapters_novel_id_chapter_number", "novel_id", "chapter_number"),
     )
 
     # Relationships
