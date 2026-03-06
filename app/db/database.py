@@ -5,13 +5,14 @@ from app.config import get_settings
 
 settings = get_settings()
 
-# Supabase (and other hosted Postgres) require SSL
-_is_local = "localhost" in settings.DATABASE_URL or "127.0.0.1" in settings.DATABASE_URL
-_connect_args = {} if _is_local else {"sslmode": "require"}
+# Supabase and other hosted Postgres require SSL.
+# Append ?sslmode=require to the URL if not already present and not local.
+_db_url = settings.DATABASE_URL
+if "localhost" not in _db_url and "127.0.0.1" not in _db_url and "sslmode" not in _db_url:
+    _db_url += "?sslmode=require"
 
 engine = create_engine(
-    settings.DATABASE_URL,
-    connect_args=_connect_args,
+    _db_url,
     pool_pre_ping=True,
     echo=False,
 )

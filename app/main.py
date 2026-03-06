@@ -21,8 +21,11 @@ settings = get_settings()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Create database tables on startup."""
-    Base.metadata.create_all(bind=engine)
-    logging.info("Database tables created / verified")
+    try:
+        Base.metadata.create_all(bind=engine)
+        logging.info("Database tables created / verified")
+    except Exception as e:
+        logging.error(f"Database startup error (non-fatal): {e}")
     yield
 
 
