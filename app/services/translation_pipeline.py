@@ -43,14 +43,16 @@ def get_character_dict(db: Session, novel_id: int) -> dict[str, str]:
 
 
 def translate_chapter(db: Session, chapter_id: int) -> None:
-    """Translate a single chapter."""
+    """Translate a single chapter, always replacing old content with new."""
     chapter = db.query(Chapter).filter(Chapter.id == chapter_id).first()
     if not chapter:
         logger.error(f"Chapter {chapter_id} not found")
         return
 
     try:
-        # Update status to translating
+        # Clear old translation and mark as translating — committed immediately
+        # so any concurrent reader sees the chapter is being retranslated.
+        chapter.content_vi = None
         chapter.status = ChapterStatus.TRANSLATING
         db.commit()
 
@@ -63,28 +65,26 @@ def translate_chapter(db: Session, chapter_id: int) -> None:
 
         # Translate each chunk
         translated_chunks = []
+        new_title = None
         for i, chunk in enumerate(chunks):
             logger.info(f"Translating chunk {i + 1}/{len(chunks)} for chapter {chapter_id}")
-            
+
             # Send title to translate for the first chunk only
             title_to_translate = chapter.title if i == 0 else None
             result = translate_chunk(chunk, title_to_translate, char_dict)
-            
+
             translated_chunks.append(result.get("translation", ""))
 
-            # Update the title in the database if it was translated
+            # Capture translated title (applied after all chunks done to avoid rollback loss)
             if i == 0 and result.get("translated_title"):
-                chapter.title = result.get("translated_title")
-
+                new_title = result.get("translated_title")
 
             # Handle new characters that the LLM discovered
             new_chars = result.get("new_characters", {})
             if new_chars:
                 for cn_name, vi_name in new_chars.items():
-                    # Check if it already exists in memory dictionary
                     if cn_name not in char_dict:
                         char_dict[cn_name] = vi_name
-                        # Save to database
                         from sqlalchemy.exc import IntegrityError
                         new_char_map = CharacterMap(
                             novel_id=chapter.novel_id,
@@ -97,8 +97,14 @@ def translate_chapter(db: Session, chapter_id: int) -> None:
                         except IntegrityError:
                             db.rollback()
 
-        # Merge translated chunks
+        # --- Save new translation ---
+        # Re-fetch the chapter in case the session was reset by a rollback above
+        chapter = db.query(Chapter).filter(Chapter.id == chapter_id).first()
         chapter.content_vi = "\n\n".join(translated_chunks)
+        if new_title:
+            chapter.title = new_title
+        db.commit()  # Commit content first to ensure it's persisted
+
         chapter.status = ChapterStatus.COMPLETED
         db.commit()
 
@@ -120,8 +126,13 @@ def translate_chapter(db: Session, chapter_id: int) -> None:
 
     except Exception as e:
         logger.error(f"Error translating chapter {chapter_id}: {e}")
-        chapter.status = ChapterStatus.ERROR
-        db.commit()
+        try:
+            chapter = db.query(Chapter).filter(Chapter.id == chapter_id).first()
+            if chapter:
+                chapter.status = ChapterStatus.ERROR
+                db.commit()
+        except Exception:
+            db.rollback()
         raise
 
 

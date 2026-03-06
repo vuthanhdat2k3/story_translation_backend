@@ -90,11 +90,6 @@ def retranslate_chapter(
     if chapter.status == ChapterStatus.TRANSLATING:
         raise HTTPException(status_code=400, detail="Chapter is already being translated")
 
-    # Reset translation state
-    chapter.content_vi = None
-    chapter.status = ChapterStatus.PENDING
-    db.commit()
-
     def _run_translation(cid: int):
         session = SessionLocal()
         try:
