@@ -11,3 +11,7 @@ pydantic==2.10.4
 pydantic-settings==2.7.1
 aiofiles==24.1.0
 gunicorn==23.0.0
+requests==2.32.3
+beautifulsoup4==4.12.3
+selenium==4.27.1
+webdriver-manager==4.0.2

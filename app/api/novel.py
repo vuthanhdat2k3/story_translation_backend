@@ -55,10 +55,29 @@ def get_novel(novel_id: int, db: Session = Depends(get_db)):
 
 
 from pydantic import BaseModel
+from app.db.database import SessionLocal
+from app.services.novel543_crawler import (
+    crawl_latest_chapter_to_db,
+    crawl_specific_chapter_to_db,
+    DEFAULT_NOVEL543_URL,
+)
+from app.services.translation_pipeline import translate_chapter as translate_chapter_task
 
 class PasteChaptersRequest(BaseModel):
     text: str
     auto_translate: bool = False
+
+
+class CrawlLatestRequest(BaseModel):
+    source_url: str = DEFAULT_NOVEL543_URL
+    auto_translate: bool = True
+    cookie: str | None = None
+
+
+class CrawlSpecificRequest(BaseModel):
+    chapter_number: int
+    source_url: str = DEFAULT_NOVEL543_URL
+    auto_translate: bool = True
 
 @router.post("", response_model=NovelResponse)
 def create_novel(
@@ -187,3 +206,88 @@ def delete_novel(novel_id: int, db: Session = Depends(get_db)):
     db.delete(novel)
     db.commit()
     return {"message": f"Novel '{novel.title}' deleted successfully"}
+
+
+@router.post("/{novel_id}/chapters/crawl-latest")
+def crawl_latest_chapter(
+    novel_id: int,
+    req: CrawlLatestRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """Detect the latest chapter from novel543, save it, and optionally translate it."""
+    try:
+        result = crawl_latest_chapter_to_db(
+            db,
+            novel_id,
+            req.source_url,
+            cookie_header=req.cookie,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Crawl failed: {e}")
+
+    if req.auto_translate:
+        def _run_translation(chapter_id: int):
+            session = SessionLocal()
+            try:
+                translate_chapter_task(session, chapter_id)
+            finally:
+                session.close()
+
+        background_tasks.add_task(_run_translation, result.chapter_id)
+
+    return {
+        "message": "Crawl latest chapter thanh cong",
+        "novel_id": novel_id,
+        "chapter_id": result.chapter_id,
+        "chapter_number": result.chapter_number,
+        "title": result.title,
+        "created": result.created,
+        "translation_started": req.auto_translate,
+    }
+
+
+@router.post("/{novel_id}/chapters/crawl-specific")
+def crawl_specific_chapter(
+    novel_id: int,
+    req: CrawlSpecificRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """Crawl a specific chapter number from novel543, save it, and optionally translate it."""
+    if req.chapter_number < 1:
+        raise HTTPException(status_code=400, detail="So chuong khong hop le")
+
+    try:
+        result = crawl_specific_chapter_to_db(
+            db,
+            novel_id,
+            req.chapter_number,
+            req.source_url,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Crawl failed: {e}")
+
+    if req.auto_translate:
+        def _run_translation(chapter_id: int):
+            session = SessionLocal()
+            try:
+                translate_chapter_task(session, chapter_id)
+            finally:
+                session.close()
+
+        background_tasks.add_task(_run_translation, result.chapter_id)
+
+    return {
+        "message": f"Crawl chapter {req.chapter_number} thanh cong",
+        "novel_id": novel_id,
+        "chapter_id": result.chapter_id,
+        "chapter_number": result.chapter_number,
+        "title": result.title,
+        "created": result.created,
+        "translation_started": req.auto_translate,
+    }
