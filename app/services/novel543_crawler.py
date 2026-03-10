@@ -1,5 +1,6 @@
 """Crawler service for fetching the latest chapter from novel543."""
 
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -74,8 +75,20 @@ def _build_driver() -> Any:
         ) from e
 
     options = webdriver.ChromeOptions()
-    options.add_argument("--start-maximized")
     options.add_argument("--disable-blink-features=AutomationControlled")
+
+    if os.environ.get("RENDER") or os.environ.get("HEADLESS_CHROME"):
+        # Server / cloud environment (Render, Docker, etc.)
+        options.add_argument("--headless=new")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--window-size=1920,1080")
+        options.binary_location = "/usr/bin/google-chrome"
+    else:
+        # Local development – open visible browser window
+        options.add_argument("--start-maximized")
+
     return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
 
 
