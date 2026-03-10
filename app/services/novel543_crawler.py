@@ -10,6 +10,8 @@ import requests
 from bs4 import BeautifulSoup
 from sqlalchemy.orm import Session
 
+from sqlalchemy import text
+
 from app.models.chapter import Chapter
 from app.models.novel import Novel
 
@@ -317,6 +319,39 @@ def _crawl_full_chapter(
     return full_text, (title or f"Chuong {chapter_number}")
 
 
+def _upsert_chapter(
+    db: Session,
+    novel_id: int,
+    chapter_number: int,
+    title: str,
+    content_cn: str,
+) -> tuple[Chapter, bool]:
+    """Insert or update a chapter row, auto-fixing sequence conflicts."""
+    chapter = (
+        db.query(Chapter)
+        .filter(Chapter.novel_id == novel_id, Chapter.chapter_number == chapter_number)
+        .first()
+    )
+    if chapter:
+        chapter.title = title
+        chapter.content_cn = content_cn
+        chapter.content_vi = None
+        return chapter, False
+
+    # Reset the id sequence before inserting to avoid duplicate key errors
+    db.execute(
+        text("SELECT setval('chapters_id_seq', COALESCE((SELECT MAX(id) FROM chapters), 0))")
+    )
+    chapter = Chapter(
+        novel_id=novel_id,
+        chapter_number=chapter_number,
+        title=title,
+        content_cn=content_cn,
+    )
+    db.add(chapter)
+    return chapter, True
+
+
 def crawl_latest_chapter_to_db(
     db: Session,
     novel_id: int,
@@ -358,26 +393,7 @@ def crawl_latest_chapter_to_db(
     if last_error is not None:
         raise ValueError(str(last_error))
 
-    chapter = (
-        db.query(Chapter)
-        .filter(Chapter.novel_id == novel_id, Chapter.chapter_number == latest)
-        .first()
-    )
-
-    created = False
-    if chapter:
-        chapter.title = title
-        chapter.content_cn = content_cn
-        chapter.content_vi = None
-    else:
-        chapter = Chapter(
-            novel_id=novel_id,
-            chapter_number=latest,
-            title=title,
-            content_cn=content_cn,
-        )
-        db.add(chapter)
-        created = True
+    chapter, created = _upsert_chapter(db, novel_id, latest, title, content_cn)
 
     if latest > novel.total_chapters:
         novel.total_chapters = latest
@@ -425,26 +441,7 @@ def crawl_specific_chapter_to_db(
     if last_error is not None:
         raise ValueError(str(last_error))
 
-    chapter = (
-        db.query(Chapter)
-        .filter(Chapter.novel_id == novel_id, Chapter.chapter_number == chapter_number)
-        .first()
-    )
-
-    created = False
-    if chapter:
-        chapter.title = title
-        chapter.content_cn = content_cn
-        chapter.content_vi = None
-    else:
-        chapter = Chapter(
-            novel_id=novel_id,
-            chapter_number=chapter_number,
-            title=title,
-            content_cn=content_cn,
-        )
-        db.add(chapter)
-        created = True
+    chapter, created = _upsert_chapter(db, novel_id, chapter_number, title, content_cn)
 
     if chapter_number > novel.total_chapters:
         novel.total_chapters = chapter_number
