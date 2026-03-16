@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
+from sqlalchemy import inspect, text
 
 from app.config import get_settings
 from app.db.database import engine, Base
@@ -19,11 +20,31 @@ logging.basicConfig(
 settings = get_settings()
 
 
+def _ensure_novel_crawl_columns() -> None:
+    """Best-effort schema patch for existing databases without migrations."""
+    inspector = inspect(engine)
+    if not inspector.has_table("novels"):
+        return
+
+    existing_columns = {col["name"] for col in inspector.get_columns("novels")}
+    with engine.begin() as conn:
+        if "source_url" not in existing_columns:
+            conn.execute(text("ALTER TABLE novels ADD COLUMN source_url VARCHAR(1024)"))
+            logging.info("Added novels.source_url column")
+        if "crawl_prefix" not in existing_columns:
+            conn.execute(text("ALTER TABLE novels ADD COLUMN crawl_prefix VARCHAR(64)"))
+            logging.info("Added novels.crawl_prefix column")
+        if "pages_per_chapter" not in existing_columns:
+            conn.execute(text("ALTER TABLE novels ADD COLUMN pages_per_chapter INTEGER DEFAULT 2"))
+            logging.info("Added novels.pages_per_chapter column")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Create database tables on startup."""
     try:
         Base.metadata.create_all(bind=engine)
+        _ensure_novel_crawl_columns()
         logging.info("Database tables created / verified")
     except Exception as e:
         logging.error(f"Database startup error (non-fatal): {e}")

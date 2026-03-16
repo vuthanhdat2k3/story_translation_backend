@@ -17,6 +17,7 @@ from app.models.novel import Novel
 
 DEFAULT_NOVEL543_URL = "https://www.novel543.com/1215500675"
 DEFAULT_CHAPTER_PREFIX = "8096"
+DEFAULT_PAGES_PER_CHAPTER = 2
 REQUEST_TIMEOUT = 20
 SELENIUM_WAIT_SECONDS = 5
 SELENIUM_BOT_BYPASS_TIMEOUT = 120
@@ -258,7 +259,7 @@ def _detect_latest_by_probing(
 def _parse_latest_from_html(html: str) -> tuple[str, int] | None:
     soup = BeautifulSoup(html, "html.parser")
     hrefs = [a.get("href", "") for a in soup.select("a[href]")]
-    pattern = re.compile(r"/(\d+)/(\d+)_(\d+)(?:_2)?\.html$")
+    pattern = re.compile(r"/(\d+)/(\d+)_(\d+)(?:_(\d+))?\.html$")
 
     candidates: list[tuple[str, int]] = []
     for href in hrefs:
@@ -276,43 +277,76 @@ def _parse_latest_from_html(html: str) -> tuple[str, int] | None:
 def _detect_prefix_and_latest(
     novel_url: str,
     start_hint: int,
+    prefix_hint: str | None,
     driver: Any,
 ) -> tuple[str, int]:
     # Open novel page in Selenium (same browser session, no new challenge).
     page_html = _get_html_selenium_with_bypass(driver, novel_url)
+    if prefix_hint:
+        latest = _detect_latest_by_probing(
+            novel_url=novel_url,
+            prefix=prefix_hint,
+            start_hint=start_hint,
+            driver=driver,
+        )
+        return prefix_hint, latest
+
     parsed = _parse_latest_from_html(page_html)
     if parsed:
         return parsed
 
-    latest = _detect_latest_by_probing(
-        novel_url=novel_url,
-        prefix=DEFAULT_CHAPTER_PREFIX,
-        start_hint=start_hint,
-        driver=driver,
+    raise ValueError(
+        "Khong tu detect duoc prefix tu trang truyện. Vui long nhap prefix crawl trong cai dat tac pham."
     )
-    return DEFAULT_CHAPTER_PREFIX, latest
 
 
 def _crawl_full_chapter(
     novel_url: str,
     prefix: str,
     chapter_number: int,
+    pages_per_chapter: int,
     driver: Any,
 ) -> tuple[str, str]:
-    part1_url = f"{novel_url}/{prefix}_{chapter_number}.html"
-    part2_url = f"{novel_url}/{prefix}_{chapter_number}_2.html"
+    parts = max(1, pages_per_chapter)
+    chunks: list[str] = []
+    title: str | None = None
 
-    html1 = _get_html_selenium_with_bypass(driver, part1_url)
-    text1, title = _extract_chapter_text(html1)
+    for page in range(1, parts + 1):
+        if parts == 1 and page == 1:
+            candidate_urls = [
+                f"{novel_url}/{prefix}_{chapter_number}.html",
+                f"{novel_url}/{prefix}_{chapter_number}_1.html",
+            ]
+        elif page == 1:
+            candidate_urls = [
+                f"{novel_url}/{prefix}_{chapter_number}_1.html",
+                f"{novel_url}/{prefix}_{chapter_number}.html",
+            ]
+        else:
+            candidate_urls = [f"{novel_url}/{prefix}_{chapter_number}_{page}.html"]
 
-    text2 = ""
-    try:
-        html2 = _get_html_selenium_with_bypass(driver, part2_url)
-        text2, _ = _extract_chapter_text(html2)
-    except Exception:
-        text2 = ""
+        page_text = ""
+        for url in candidate_urls:
+            try:
+                html = _get_html_selenium_with_bypass(driver, url)
+            except Exception:
+                continue
 
-    full_text = "\n".join(chunk for chunk in [text1, text2] if chunk).strip()
+            extracted_text, extracted_title = _extract_chapter_text(html)
+            if not extracted_text.strip():
+                continue
+            if title is None and extracted_title:
+                title = extracted_title
+            page_text = extracted_text
+            break
+
+        if page == 1 and not page_text.strip():
+            raise ValueError(f"Khong crawl duoc noi dung chapter {chapter_number}")
+
+        if page_text.strip():
+            chunks.append(page_text)
+
+    full_text = "\n".join(chunks).strip()
     if not full_text:
         raise ValueError(f"Khong crawl duoc noi dung chapter {chapter_number}")
 
@@ -355,12 +389,19 @@ def _upsert_chapter(
 def crawl_latest_chapter_to_db(
     db: Session,
     novel_id: int,
-    source_url: str = DEFAULT_NOVEL543_URL,
+    source_url: str | None = None,
+    prefix: str | None = None,
+    pages_per_chapter: int | None = None,
     cookie_header: str | None = None,
 ) -> CrawlLatestResult:
     novel = db.query(Novel).filter(Novel.id == novel_id).first()
     if not novel:
         raise ValueError(f"Novel {novel_id} khong ton tai")
+
+    effective_source_url = source_url or novel.source_url or DEFAULT_NOVEL543_URL
+    effective_prefix = (prefix or novel.crawl_prefix or "").strip() or None
+    effective_pages_per_chapter = pages_per_chapter or novel.pages_per_chapter or DEFAULT_PAGES_PER_CHAPTER
+    effective_pages_per_chapter = max(1, effective_pages_per_chapter)
 
     last_error: Exception | None = None
     content_cn = ""
@@ -373,14 +414,16 @@ def crawl_latest_chapter_to_db(
         driver = _build_driver()
         try:
             prefix, latest = _detect_prefix_and_latest(
-                source_url,
+                effective_source_url,
                 start_hint=max(1, novel.total_chapters),
+                prefix_hint=effective_prefix,
                 driver=driver,
             )
             content_cn, title = _crawl_full_chapter(
-                source_url,
+                effective_source_url,
                 prefix,
                 latest,
+                effective_pages_per_chapter,
                 driver,
             )
             last_error = None
@@ -413,13 +456,19 @@ def crawl_specific_chapter_to_db(
     db: Session,
     novel_id: int,
     chapter_number: int,
-    source_url: str = DEFAULT_NOVEL543_URL,
-    prefix: str = DEFAULT_CHAPTER_PREFIX,
+    source_url: str | None = None,
+    prefix: str | None = None,
+    pages_per_chapter: int | None = None,
 ) -> CrawlLatestResult:
     """Crawl a specific chapter number and upsert into DB."""
     novel = db.query(Novel).filter(Novel.id == novel_id).first()
     if not novel:
         raise ValueError(f"Novel {novel_id} khong ton tai")
+
+    effective_source_url = source_url or novel.source_url or DEFAULT_NOVEL543_URL
+    effective_prefix = (prefix or novel.crawl_prefix or "").strip() or None
+    effective_pages_per_chapter = pages_per_chapter or novel.pages_per_chapter or DEFAULT_PAGES_PER_CHAPTER
+    effective_pages_per_chapter = max(1, effective_pages_per_chapter)
 
     last_error: Exception | None = None
     content_cn = ""
@@ -428,8 +477,20 @@ def crawl_specific_chapter_to_db(
     for _ in range(2):
         driver = _build_driver()
         try:
+            if not effective_prefix:
+                detected_prefix, _ = _detect_prefix_and_latest(
+                    effective_source_url,
+                    start_hint=max(1, chapter_number),
+                    prefix_hint=None,
+                    driver=driver,
+                )
+                effective_prefix = detected_prefix
             content_cn, title = _crawl_full_chapter(
-                source_url, prefix, chapter_number, driver,
+                effective_source_url,
+                effective_prefix,
+                chapter_number,
+                effective_pages_per_chapter,
+                driver,
             )
             last_error = None
             break

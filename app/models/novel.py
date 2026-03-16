@@ -1,6 +1,6 @@
 import enum
 from datetime import datetime
-from sqlalchemy import String, Text, DateTime, Enum, func
+from sqlalchemy import String, Text, DateTime, Enum, Integer, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.database import Base
@@ -20,6 +20,9 @@ class Novel(Base):
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     author: Mapped[str] = mapped_column(String(255), default="Unknown")
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    crawl_prefix: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    pages_per_chapter: Mapped[int] = mapped_column(Integer, default=2)
     status: Mapped[NovelStatus] = mapped_column(
         Enum(NovelStatus), default=NovelStatus.PENDING
     )
